@@ -1,0 +1,52 @@
+version: "3.8"
+
+services:
+
+  # PostgreSQL database for storing accounts, sessions, results
+  db:
+    image: postgres:13
+    container_name: fb_pervobil_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fbuser
+      POSTGRES_PASSWORD: fbpass
+      POSTGRES_DB: facebook
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  # Prometheus for scraping metrics
+  prometheus:
+    image: prom/prometheus:v2.44.0
+    container_name: fb_pervobil_prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports:
+      - "9090:9090"
+
+  # Grafana for visualizing metrics
+  grafana:
+    image: grafana/grafana-oss:9.5.5
+    container_name: fb_pervobil_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "secret"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_PATHS_DATA: "/var/lib/grafana"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
+    driver: local
+  grafana_data:
+    driver: local

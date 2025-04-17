@@ -1,0 +1,168 @@
+name: facebook_pervobil_ideal
+description: >-
+  End-to-end orchestration: регистрация аккаунтов, прогрев, классификация KYC,
+  тест «первобил», запуск основной кампании и отчёты.
+settings:
+  - settings.toml
+
+nodes:
+  # 1. Создание аккаунтов
+  - id: create_account
+    type: python
+    retries: 3
+    code: |
+      from modules.account_creator import create_account_batch
+      # создаём batch_size аккаунтов
+      results = await create_account_batch(settings.batch_size)
+
+  # 2. KYC-проверки: identity, business, payment, policies
+  - id: kyc_check_identity
+    type: map
+    input: create_account
+    worker: python
+    code: |
+      from modules.account_classifier import check_identity
+      return await check_identity(item)
+
+  - id: kyc_check_business
+    type: map
+    input: kyc_check_identity
+    worker: python
+    code: |
+      from modules.account_classifier import check_business
+      return await check_business(item)
+
+  - id: kyc_check_payment
+    type: map
+    input: kyc_check_business
+    worker: python
+    code: |
+      from modules.account_classifier import check_payment
+      return await check_payment(item)
+
+  - id: kyc_check_policies
+    type: map
+    input: kyc_check_payment
+    worker: python
+    code: |
+      from modules.account_classifier import check_policies
+      return await check_policies(item)
+
+  # 3. Фильтрация: пропускаем только аккаунты без серьёзных требований
+  - id: filter_accounts
+    type: python
+    input: kyc_check_policies
+    code: |
+      filtered = [acc for acc in kyc_check_policies if acc['kyc_status']=='OK']
+      results = filtered
+
+  # 4. Прогрев аккаунтов мелкими шагами
+  - id: warm_visit_home
+    type: shell
+    input: filter_accounts
+    command: >-
+      python modules/playwright_worker.py --action visit_home --account '{{item}}'
+
+  - id: warm_like_posts
+    type: shell
+    input: warm_visit_home
+    command: >-
+      python modules/playwright_worker.py --action like_posts --account '{{item}}'
+
+  - id: warm_join_groups
+    type: shell
+    input: warm_like_posts
+    command: >-
+      python modules/playwright_worker.py --action join_groups --account '{{item}}'
+
+  - id: warm_visit_ads
+    type: shell
+    input: warm_join_groups
+    command: >-
+      python modules/playwright_worker.py --action visit_ads_manager --account '{{item}}'
+
+  - id: warmed_accounts
+    type: python
+    input: warm_visit_ads
+    code: |
+      # все аккаунты прогреты, возвращаем их
+      results = warm_visit_ads
+
+  # 5. Назначение прокси
+  - id: assign_proxy
+    type: map
+    input: warmed_accounts
+    worker: python
+    code: |
+      from modules.proxy_api_client import fetch_proxy
+      acc['proxy'] = await fetch_proxy(settings.oxylabs_api_key)
+      return acc
+
+  # 6. Запуск тестовой кампании (первобил)
+  - id: launch_test_ad
+    type: map
+    input: assign_proxy
+    worker: shell
+    command: >-
+      python modules/playwright_worker.py \
+        --mode test \
+        --proxy '{{item.proxy}}' \
+        --account '{{item}}'
+
+  # 7. Верификация тестовой кампании
+  - id: verify_test_ad
+    type: map
+    input: launch_test_ad
+    worker: python
+    code: |
+      from modules.ad_manager import TestAdVerifier
+      res = await TestAdVerifier(item).verify()
+      item.update(res)
+      return item
+
+  # 8. Запуск основной Bulk-кампании
+  - id: launch_main_campaign
+    type: map
+    input: verify_test_ad
+    worker: shell
+    command: >-
+      python modules/playwright_worker.py \
+        --mode main \
+        --proxy '{{item.proxy}}' \
+        --session '{{item.session}}'
+
+  - id: verify_main_campaign
+    type: map
+    input: launch_main_campaign
+    worker: python
+    code: |
+      from modules.ad_manager import MainCampaignAgent
+      res = await MainCampaignAgent(item).confirm()
+      item.update(res)
+      return item
+
+  # 9. Сохранение результатов
+  - id: report_results
+    type: python
+    code: |
+      import csv
+      with open('results.csv','w', newline='') as f:
+          writer = csv.DictWriter(f, fieldnames=[
+            'login','kyc_status','test_success','firstbill_amount','campaign_id'
+          ])
+          writer.writeheader()
+          for acc in verify_main_campaign:
+              writer.writerow({
+                'login': acc['login'],
+                'kyc_status': acc['kyc_status'],
+                'test_success': acc.get('test_success', False),
+                'firstbill_amount': acc.get('firstbill_amount', 0),
+                'campaign_id': acc.get('campaign_id', '')
+              })
+
+on_failure:
+  node: error_handler
+  handler: python
+  code: |
+    from modules.error_handler import handle_pipeline_error
+    handle_pipeline_error(context)
