@@ -1,0 +1,7 @@
+[default]
+batch_size = 100
+db_dsn = "postgres://fbuser:fbpass@db:5432/facebook"
+helper_sms_key = "IQJy4dAcGxtLRf73gNAc"
+oxylabs_api_key = "YOUR_OXYLABS_API_KEY"
+use_tor = true
+password_manager_key = "YOUR_FERNET_KEY"
